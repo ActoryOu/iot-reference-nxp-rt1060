@@ -392,45 +392,44 @@ void SendARP_task( void * arg )
 
 		if( xConnectedSocket != FREERTOS_INVALID_SOCKET )
 		{
-
-		while( 1 )
-		{
-			memset( recvBuffer, 0, 200 );
-			if( FreeRTOS_recv( serverSocket, recvBuffer, 200, 0 ) > 0 )
+			while( 1 )
 			{
-                static uint8_t display = 0;
-                char out;
-                switch( display )
-                {
-                    case 0:
-                    	out = '\\';
-                    	break;
-                    case 1:
-                        out = '|';
-                        break;
-                    case 2:
-                        out = '/';
-                        break;
-                    case 3:
-                        out = '-';
-                        break;
-                }
-                display++;
-                if(display > 3)
-                	display = 0;
+				memset( recvBuffer, 0, 200 );
+				if( FreeRTOS_recv( serverSocket, recvBuffer, 200, 0 ) > 0 )
+				{
+					static uint8_t display = 0;
+					char out;
+					switch( display )
+					{
+						case 0:
+							out = '\\';
+							break;
+						case 1:
+							out = '|';
+							break;
+						case 2:
+							out = '/';
+							break;
+						case 3:
+							out = '-';
+							break;
+					}
+					display++;
+					if(display > 3)
+						display = 0;
 
-                configPRINTF( ( "\b%c", out ) );
+					configPRINTF( ( "\b%c", out ) );
 
-				FreeRTOS_send( serverSocket, recvBuffer, strlen( recvBuffer ), 0 );
+					FreeRTOS_send( serverSocket, recvBuffer, strlen( recvBuffer ), 0 );
+				}
+				else
+				{
+					configPRINTF( ( "ERROR Receiving!" ) );
+					FreeRTOS_shutdown( serverSocket, 0U );
+					FreeRTOS_closesocket( serverSocket );
+					break;
+				}
 			}
-			else
-			{
-				configPRINTF( ( "ERROR Receiving!" ) );
-				FreeRTOS_shutdown( serverSocket, 0U );
-				FreeRTOS_closesocket( serverSocket );
-				break;
-			}
-		}
 		}
 	}
 

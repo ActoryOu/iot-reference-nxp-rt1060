@@ -45,6 +45,10 @@
 #include "fsl_enet_mdio.h"
 #include "fsl_enet.h"
 
+/* FreeRTOS+TCP includes. */
+#include "FreeRTOS_IP.h"
+#include "FreeRTOS_Routing.h"
+#include "FreeRTOS_ARP.h"
 #include "NetworkInterface.h"
 
 #if ipconfigETHERNET_DRIVER_FILTERS_FRAME_TYPES != 1
@@ -61,6 +65,7 @@
 
 /* ENET clock frequency. */
 #define EXAMPLE_CLOCK_FREQ    CLOCK_GetFreq( kCLOCK_IpgClk )
+
 
 /*******************************************************************************
  * Definitions
@@ -207,6 +212,8 @@ static struct ethernetif * ethernetifLocal = &EthernetInterface1;
 
 static bool bGlobalLinkStatus = false;
 
+static NetworkInterface_t * pxMyInterface = NULL;
+
 /*-----------------------------------------------------------*/
 
 AT_NONCACHEABLE_SECTION_ALIGN( static enet_rx_bd_struct_t rxBuffDescrip_0[ ENET_RXBD_NUM ], FSL_ENET_BUFF_ALIGNMENT );
@@ -229,6 +236,7 @@ static phy_config_t xConfig =
                                            * turned on, this is not used. */
     .enableEEE = pdFALSE                  /* Disable the energy efficient PHY. */
 };
+
 /*-----------------------------------------------------------*/
 /*-----------------------------------------------------------*/
 
@@ -249,7 +257,58 @@ static status_t xWaitPHY( phy_config_t xConfig );
 static status_t xEMACInit( phy_speed_t speed,
                            phy_duplex_t duplex );
 
-BaseType_t xNetworkInterfaceInitialise( void )
+static BaseType_t prvNXP1060_NetworkInterfaceInitialise( NetworkInterface_t * pxInterface );
+
+static BaseType_t prvNXP1060_NetworkInterfaceOutput( NetworkInterface_t * pxInterface,
+                                                     NetworkBufferDescriptor_t * const pxNetworkBuffer,
+                                                     BaseType_t xReleaseAfterSend );
+
+static BaseType_t prvNXP1060_GetPhyLinkStatus( NetworkInterface_t * pxInterface );
+
+NetworkInterface_t * pxNXP1060_FillInterfaceDescriptor( BaseType_t xEMACIndex,
+                                                        NetworkInterface_t * pxInterface );
+/*-----------------------------------------------------------*/
+
+#if ( ipconfigCOMPATIBLE_WITH_SINGLE != 0 )
+
+/* Do not call the following function directly. It is there for downward compatibility.
+ * The function FreeRTOS_IPInit() will call it to initialice the interface and end-point
+ * objects.  See the description in FreeRTOS_Routing.h. */
+    NetworkInterface_t * pxFillInterfaceDescriptor( BaseType_t xEMACIndex,
+                                                    NetworkInterface_t * pxInterface )
+    {
+        pxNXP1060_FillInterfaceDescriptor( xEMACIndex, pxInterface );
+    }
+
+#endif /* ( ipconfigCOMPATIBLE_WITH_SINGLE != 0 ) */
+/*-----------------------------------------------------------*/
+
+NetworkInterface_t * pxNXP1060_FillInterfaceDescriptor( BaseType_t xEMACIndex,
+                                                        NetworkInterface_t * pxInterface )
+{
+    static char pcName[ 10 ];
+
+    /* This function pxNXP1060_FillInterfaceDescriptor() adds a network-interface.
+     * Make sure that the object pointed to by 'pxInterface'
+     * is declared static or global, and that it will remain to exist. */
+
+    snprintf( pcName, sizeof( pcName ), "NXP1060%ld", xEMACIndex );
+
+    memset( pxInterface, '\0', sizeof( *pxInterface ) );
+    pxInterface->pcName = pcName;                    /* Just for logging, debugging. */
+    pxInterface->pvArgument = ( void * ) xEMACIndex; /* Has only meaning for the driver functions. */
+    pxInterface->pfInitialise = prvNXP1060_NetworkInterfaceInitialise;
+    pxInterface->pfOutput = prvNXP1060_NetworkInterfaceOutput;
+    pxInterface->pfGetPhyLinkStatus = prvNXP1060_GetPhyLinkStatus;
+
+    FreeRTOS_AddNetworkInterface( pxInterface );
+    pxMyInterface = pxInterface;
+
+    return pxInterface;
+}
+/*-----------------------------------------------------------*/
+
+static BaseType_t prvNXP1060_NetworkInterfaceInitialise( NetworkInterface_t * pxInterface )
 {
     status_t xStatus;
     BaseType_t xResult = pdFAIL;
@@ -358,38 +417,55 @@ BaseType_t xNetworkInterfaceInitialise( void )
 
     return xResult;
 }
+/*-----------------------------------------------------------*/
 
-BaseType_t xNetworkInterfaceOutput( NetworkBufferDescriptor_t * const pxNetworkBuffer,
-                                    BaseType_t xReleaseAfterSend )
+static BaseType_t prvNXP1060_NetworkInterfaceOutput( NetworkInterface_t * pxInterface,
+                                                     NetworkBufferDescriptor_t * const pxNetworkBuffer,
+                                                     BaseType_t xReleaseAfterSend )
 {
     status_t result;
     BaseType_t xReturn = pdFAIL;
 
-    if( bGlobalLinkStatus == true )
+    /* Avoid warning about unused parameter. */
+    ( void ) pxInterface;
+
+    do
     {
-        /* ENET_SendFrame copies the data before sending it. Therefore, the network buffer can
-         * be released without worrying about the buffer memory being used by the ENET_SendFrame
-         * function. */
-        result = ENET_SendFrame( ethernetifLocal->base,
-                                 &ethernetifLocal->handle,
-                                 pxNetworkBuffer->pucEthernetBuffer,
-                                 pxNetworkBuffer->xDataLength,
-                                 0,
-                                 false,
-                                 NULL );
-
-        switch( result )
+        if( xCheckLoopback( pxNetworkBuffer, xReleaseAfterSend ) != 0 )
         {
-            case kStatus_ENET_TxFrameBusy:
-                FreeRTOS_printf( ( "Failed to send the frame - driver busy!" ) );
-                break;
-
-            case kStatus_Success:
-                iptraceNETWORK_INTERFACE_TRANSMIT();
-                xReturn = pdPASS;
-                break;
+            /* The packet has been sent back to the IP-task.
+             * The IP-task will further handle it.
+             * Do not release the descriptor. */
+        	xReleaseAfterSend = pdFALSE;
+            break;
         }
-    }
+
+        if( bGlobalLinkStatus == true )
+        {
+            /* ENET_SendFrame copies the data before sending it. Therefore, the network buffer can
+             * be released without worrying about the buffer memory being used by the ENET_SendFrame
+             * function. */
+            result = ENET_SendFrame( ethernetifLocal->base,
+                                     &ethernetifLocal->handle,
+                                     pxNetworkBuffer->pucEthernetBuffer,
+                                     pxNetworkBuffer->xDataLength,
+                                     0,
+                                     false,
+                                     NULL );
+
+            switch( result )
+            {
+                case kStatus_ENET_TxFrameBusy:
+                    FreeRTOS_printf( ( "Failed to send the frame - driver busy!" ) );
+                    break;
+
+                case kStatus_Success:
+                    iptraceNETWORK_INTERFACE_TRANSMIT();
+                    xReturn = pdPASS;
+                    break;
+            }
+        }
+    } while( ipFALSE_BOOL );
 
     if( xReleaseAfterSend == pdTRUE )
     {
@@ -398,6 +474,23 @@ BaseType_t xNetworkInterfaceOutput( NetworkBufferDescriptor_t * const pxNetworkB
 
     return xReturn;
 }
+/*-----------------------------------------------------------*/
+
+static BaseType_t prvNXP1060_GetPhyLinkStatus( NetworkInterface_t * pxInterface )
+{
+    BaseType_t xReturn = pdFALSE;
+
+    /* Avoid warning about unused parameter. */
+    ( void ) pxInterface;
+
+    if( bGlobalLinkStatus == true )
+    {
+        xReturn = pdTRUE;
+    }
+
+    return xReturn;
+}
+/*-----------------------------------------------------------*/
 
 static void prvEMACHandlerTask( void * parameter )
 {
@@ -488,6 +581,7 @@ static void prvEMACHandlerTask( void * parameter )
         }
     }
 }
+/*-----------------------------------------------------------*/
 
 /**
  * @brief Callback for ENET interrupts. We have only enabled the Ethernet receive interrupts
@@ -518,6 +612,7 @@ static void ethernet_callback( ENET_Type * base,
             break;
     }
 }
+/*-----------------------------------------------------------*/
 
 /**
  * @brief This function verifies that the incoming frame needs processing.
@@ -534,6 +629,8 @@ static void prvProcessFrame( int length )
     {
         ENET_ReadFrame( ethernetifLocal->base, &( ethernetifLocal->handle ), pxBufferDescriptor->pucEthernetBuffer, length, 0, NULL );
         pxBufferDescriptor->xDataLength = length;
+        pxBufferDescriptor->pxInterface = pxMyInterface;
+        pxBufferDescriptor->pxEndPoint = FreeRTOS_MatchingEndpoint( pxMyInterface, pxBufferDescriptor->pucEthernetBuffer );
 
         if( ipCONSIDER_FRAME_FOR_PROCESSING( pxBufferDescriptor->pucEthernetBuffer ) == eProcessBuffer )
         {
@@ -578,7 +675,7 @@ static void prvProcessFrame( int length )
         iptraceFAILED_TO_OBTAIN_NETWORK_BUFFER();
     }
 }
-
+/*-----------------------------------------------------------*/
 
 /**
  * @brief This function is used to setup the PHY in auto-negotiation mode.
@@ -606,6 +703,7 @@ static status_t xSetupPHY( phy_config_t * pxConfig )
 
     return xStatus;
 }
+/*-----------------------------------------------------------*/
 
 /**
  * @brief This function is used wait on the auto-negotiation completion.
@@ -692,6 +790,7 @@ static status_t xWaitPHY( phy_config_t xConfig )
 
     return xStatus;
 }
+/*-----------------------------------------------------------*/
 
 /**
  * @brief This function is used to initialize the ENET module. It initializes the network buffers
@@ -717,6 +816,7 @@ static status_t xEMACInit( phy_speed_t speed,
     /*! @brief Pointers to enet receive IRQ number for each instance. */
     static const IRQn_Type enetRxIrqId[] = ENET_Receive_IRQS;
     int i;
+    NetworkEndPoint_t * pxEndPoint;
 
     ethernetifLocal->RxBuffDescrip = &( rxBuffDescrip_0[ 0 ] );
     ethernetifLocal->TxBuffDescrip = &( txBuffDescrip_0[ 0 ] );
@@ -773,6 +873,9 @@ static status_t xEMACInit( phy_speed_t speed,
     }
     else
     {
+        pxEndPoint = FreeRTOS_FirstEndPoint( pxMyInterface );
+        configASSERT( pxEndPoint != NULL );
+
         for( i = 0; i < ENET_RXBUFF_NUM; i++ )
         {
             ethernetifLocal->RxPbufs[ i ].buffer = &( ethernetifLocal->RxDataBuff[ i ][ 0 ] );
@@ -784,8 +887,33 @@ static status_t xEMACInit( phy_speed_t speed,
                              &ethernetifLocal->handle,
                              &config,
                              &buffCfg[ 0 ],
-                             ipLOCAL_MAC_ADDRESS,
+                             pxEndPoint->xMACAddress.ucBytes,
                              sysClock );
+
+        #if ( ipconfigUSE_LLMNR == 1 )
+            ENET_AddMulticastGroup( ethernetifLocal->base, ( uint8_t * ) xLLMNR_MacAdress.ucBytes );
+        #endif /* ipconfigUSE_LLMNR */
+
+        #if ( ipconfigUSE_IPv6 != 0 )
+            #if ( ipconfigUSE_LLMNR == 1 )
+                ENET_AddMulticastGroup( ethernetifLocal->base, ( uint8_t * ) xLLMNR_MacAdressIPv6.ucBytes );
+            #endif /* ipconfigUSE_LLMNR */
+
+            for( pxEndPoint = FreeRTOS_FirstEndPoint( pxMyInterface );
+                 pxEndPoint != NULL;
+                 pxEndPoint = FreeRTOS_NextEndPoint( pxMyInterface, pxEndPoint ) )
+            {
+                if( pxEndPoint->bits.bIPv6 != pdFALSE_UNSIGNED )
+                {
+                    uint8_t ucMACAddress[ 6 ] = { 0x33, 0x33, 0xff, 0, 0, 0 };
+
+                    ucMACAddress[ 3 ] = pxEndPoint->ipv6_settings.xIPAddress.ucBytes[ 13 ];
+                    ucMACAddress[ 4 ] = pxEndPoint->ipv6_settings.xIPAddress.ucBytes[ 14 ];
+                    ucMACAddress[ 5 ] = pxEndPoint->ipv6_settings.xIPAddress.ucBytes[ 15 ];
+                    ENET_AddMulticastGroup( ethernetifLocal->base, ucMACAddress );
+                }
+            }
+        #endif /* ( ipconfigUSE_IPv6 != 0 ) */
 
         if( xStatus == kStatus_Success )
         {
@@ -800,3 +928,4 @@ static status_t xEMACInit( phy_speed_t speed,
 
     return xStatus;
 }
+/*-----------------------------------------------------------*/

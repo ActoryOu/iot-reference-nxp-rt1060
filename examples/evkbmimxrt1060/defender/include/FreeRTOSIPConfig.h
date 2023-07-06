@@ -35,6 +35,11 @@
 #ifndef FREERTOS_IP_CONFIG_H
 #define FREERTOS_IP_CONFIG_H
 
+#define ipconfigIPv4_BACKWARD_COMPATIBLE ( 1 )
+#define ipconfigUSE_IPv4 (1)
+#define ipconfigENDPOINT_DNS_ADDRESS_COUNT ( 2 )
+#define ipconfigCOMPATIBLE_WITH_SINGLE ( 1 )
+
 /* Prototype for the function used to print out.  In this case it prints to the
 console before the network is connected then a UDP port after the network has
 connected. */

@@ -33,10 +33,12 @@
 
 int app_main( void )
 {
-    BaseType_t xResult = pdPASS;
+    BaseType_t xResult = pdFAIL;
 
-
-            //xTaskCreate( )
+    for(;;)
+    {
+    	vTaskDelay( pdMS_TO_TICKS( 10000 ) );
+    }
 
     return xResult;
 }
