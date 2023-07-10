@@ -85,13 +85,16 @@ void Board_InitNetwork( void );
 
 int app_main( void );
 
+NetworkInterface_t * pxNXP1060_FillInterfaceDescriptor( BaseType_t xEMACIndex,
+                                                        NetworkInterface_t * pxInterface );
+
 /*******************************************************************************
  * Variables
  ******************************************************************************/
-const uint8_t ucIPAddress[ ipIP_ADDRESS_LENGTH_BYTES ] = { 192, 168, 1, 3 };
+const uint8_t ucIPAddress[ ipIP_ADDRESS_LENGTH_BYTES ] = { 192, 168, 115, 64 };
 const uint8_t ucNetMask[ ipIP_ADDRESS_LENGTH_BYTES ] = { 0xFF, 0xFF, 0xFF, 0x00 };
-const uint8_t ucGatewayAddress[ ipIP_ADDRESS_LENGTH_BYTES ] = { 192, 168, 1, 1 };
-const uint8_t ucDNSServerAddress[ ipIP_ADDRESS_LENGTH_BYTES ] = { 208, 67, 222, 222 };
+const uint8_t ucGatewayAddress[ ipIP_ADDRESS_LENGTH_BYTES ] = { 192, 168, 115, 254 };
+const uint8_t ucDNSServerAddress[ ipIP_ADDRESS_LENGTH_BYTES ] = { 1, 1, 1, 3 };
 /* MAC address configuration. */
 const uint8_t ucMACAddress[ ipMAC_ADDRESS_LENGTH_BYTES ] = { 0x02, 0x12, 0x13, 0x10, 0x15, 0x25 };
 
@@ -123,15 +126,36 @@ static mflash_file_t dir_template[] =
 /*******************************************************************************
  * Code
  ******************************************************************************/
+/* With WinPCap there is only 1 physical interface. */
+static NetworkInterface_t xNetworkInterface;
+/* It will have several end-points. */
+static NetworkEndPoint_t xEndPoints[ 3 ];
+
 void Board_InitNetwork( void )
 {
 	BaseType_t xResult;
 
+#if ipconfigIPv4_BACKWARD_COMPATIBLE
 	xResult = FreeRTOS_IPInit( ucIPAddress,
 	                           ucNetMask,
 	                           ucGatewayAddress,
 	                           ucDNSServerAddress,
 							   ucMACAddress );
+#else
+    pxNXP1060_FillInterfaceDescriptor( 0, &xNetworkInterface );
+
+    FreeRTOS_FillEndPoint( &xNetworkInterface, &( xEndPoints[ 0 ] ), ucIPAddress, ucNetMask, ucGatewayAddress, ucDNSServerAddress, ucMACAddress );
+    #if ( ipconfigUSE_DHCP != 0 )
+        {
+            /* End-point 0 wants to use DHCPv4. */
+            xEndPoints[ 0 ].bits.bWantDHCP = pdTRUE;
+        }
+    #endif /* ( ipconfigUSE_DHCP != 0 ) */
+
+    // FreeRTOS_FillEndPoint( &xNetworkInterface, &( xEndPoints[ 1 ] ), ucIPAddress, ucNetMask, ucGatewayAddress, ucDNSServerAddress, ucMACAddress );
+
+	xResult = FreeRTOS_IPInit_Multi();
+#endif
 
 	assert( xResult == pdPASS );
 }
@@ -318,10 +342,20 @@ void vApplicationGetIdleTaskMemory( StaticTask_t ** ppxIdleTaskTCBBuffer,
 }
 /*-----------------------------------------------------------*/
 
+#if ipconfigIPv4_BACKWARD_COMPATIBLE
 BaseType_t xApplicationDNSQueryHook( const char * pcName )
 {
 	return 0;
 }
+
+#else
+
+BaseType_t xApplicationDNSQueryHook_Multi( struct xNetworkEndPoint * pxEndPoint,
+                                                              const char * pcName )
+{
+	return 0;
+}
+#endif
 
 BaseType_t xApplicationGetRandomNumber( uint32_t * pulNumber )
 {
@@ -350,7 +384,7 @@ void SendARP_task( void * arg )
 	static const TickType_t xReceiveTimeOut = portMAX_DELAY;
 	static struct freertos_sockaddr xClient, xBindAddress;
 	static Socket_t serverSocket, xConnectedSocket;
-	static uint8_t recvBuffer[200];
+	static char recvBuffer[200];
 	static socklen_t xSize;
 	BaseType_t xBacklog = 1;
 
@@ -437,38 +471,75 @@ void SendARP_task( void * arg )
 }
 #endif
 #if ( ipconfigUSE_NETWORK_EVENT_HOOK == 1 )
-    /* This function shall be defined by the application. */
-    void vApplicationIPNetworkEventHook( eIPCallbackEvent_t eNetworkEvent )
-    {
-    	uint32_t ulIPAddress, ulNetMask, ulGatewayAddress, ulDNSServerAddress;
-    	char cBuffer[ 16 ];
-    	static uint8_t flag = pdFALSE;
+	#if ipconfigIPv4_BACKWARD_COMPATIBLE
+		/* This function shall be defined by the application. */
+		void vApplicationIPNetworkEventHook( eIPCallbackEvent_t eNetworkEvent )
+		{
+			uint32_t ulIPAddress, ulNetMask, ulGatewayAddress, ulDNSServerAddress;
+			char cBuffer[ 16 ];
+			static uint8_t flag = pdFALSE;
 
-    	if( eNetworkEvent == eNetworkUp )
-    	{
-			FreeRTOS_GetAddressConfiguration( &ulIPAddress, &ulNetMask, &ulGatewayAddress, &ulDNSServerAddress );
-			FreeRTOS_inet_ntoa( ulIPAddress, cBuffer );
-			FreeRTOS_printf( ( "\r\n\r\nIP Address: %s\r\n", cBuffer ) );
-
-			FreeRTOS_inet_ntoa( ulNetMask, cBuffer );
-			FreeRTOS_printf( ( "Subnet Mask: %s\r\n", cBuffer ) );
-
-			FreeRTOS_inet_ntoa( ulGatewayAddress, cBuffer );
-			FreeRTOS_printf( ( "Gateway Address: %s\r\n", cBuffer ) );
-
-			FreeRTOS_inet_ntoa( ulDNSServerAddress, cBuffer );
-			FreeRTOS_printf( ( "DNS Server Address: %s\r\n\r\n\r\n", cBuffer ) );
-
-			if( flag == pdFALSE )
+			if( eNetworkEvent == eNetworkUp )
 			{
-				xTaskCreate( SendARP_task, "SendTask", configMINIMAL_STACK_SIZE*5,
-							 NULL,
-							 1,
-							 NULL );
-				flag = pdTRUE;
+				FreeRTOS_GetAddressConfiguration( &ulIPAddress, &ulNetMask, &ulGatewayAddress, &ulDNSServerAddress );
+				FreeRTOS_inet_ntoa( ulIPAddress, cBuffer );
+				FreeRTOS_printf( ( "\r\n\r\nIP Address: %s\r\n", cBuffer ) );
+
+				FreeRTOS_inet_ntoa( ulNetMask, cBuffer );
+				FreeRTOS_printf( ( "Subnet Mask: %s\r\n", cBuffer ) );
+
+				FreeRTOS_inet_ntoa( ulGatewayAddress, cBuffer );
+				FreeRTOS_printf( ( "Gateway Address: %s\r\n", cBuffer ) );
+
+				FreeRTOS_inet_ntoa( ulDNSServerAddress, cBuffer );
+				FreeRTOS_printf( ( "DNS Server Address: %s\r\n\r\n\r\n", cBuffer ) );
+
+				if( flag == pdFALSE )
+				{
+					xTaskCreate( SendARP_task, "SendTask", configMINIMAL_STACK_SIZE*5,
+								 NULL,
+								 1,
+								 NULL );
+					flag = pdTRUE;
+				}
 			}
-    	}
-    }
+		}
+
+	#else
+
+		void vApplicationIPNetworkEventHook_Multi( eIPCallbackEvent_t eNetworkEvent,
+												   struct xNetworkEndPoint * pxEndPoint )
+		{
+			uint32_t ulIPAddress, ulNetMask, ulGatewayAddress, ulDNSServerAddress;
+			char cBuffer[ 16 ];
+			static uint8_t flag = pdFALSE;
+
+			if( eNetworkEvent == eNetworkUp )
+			{
+				FreeRTOS_GetEndPointConfiguration( &ulIPAddress, &ulNetMask, &ulGatewayAddress, &ulDNSServerAddress, pxEndPoint );
+				FreeRTOS_inet_ntoa( ulIPAddress, cBuffer );
+				FreeRTOS_printf( ( "\r\n\r\nIP Address: %s\r\n", cBuffer ) );
+
+				FreeRTOS_inet_ntoa( ulNetMask, cBuffer );
+				FreeRTOS_printf( ( "Subnet Mask: %s\r\n", cBuffer ) );
+
+				FreeRTOS_inet_ntoa( ulGatewayAddress, cBuffer );
+				FreeRTOS_printf( ( "Gateway Address: %s\r\n", cBuffer ) );
+
+				FreeRTOS_inet_ntoa( ulDNSServerAddress, cBuffer );
+				FreeRTOS_printf( ( "DNS Server Address: %s\r\n\r\n\r\n", cBuffer ) );
+
+				if( flag == pdFALSE )
+				{
+					xTaskCreate( SendARP_task, "SendTask", configMINIMAL_STACK_SIZE*5,
+								 NULL,
+								 1,
+								 NULL );
+					flag = pdTRUE;
+				}
+			}
+		}
+	#endif
 #endif
 #if ( ipconfigSUPPORT_OUTGOING_PINGS == 1 )
     void vApplicationPingReplyHook( ePingReplyStatus_t eStatus,
